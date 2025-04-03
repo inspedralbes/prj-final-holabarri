@@ -1,0 +1,108 @@
+name: Deploy to Clouding
+
+on:
+  push:
+    branches: [addGhactions] 
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Frontend - Nuxt
+      - name: Setup Node.js para Nuxt
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          
+      - name: Instalar dependencias Nuxt
+        run: npm ci
+        working-directory: ./front/nuxt
+
+      - name: Build Nuxt
+        run: npm run generate
+        working-directory: ./front/nuxt
+        env:
+          NUXT_PUBLIC_BASE_URL: ${{ secrets.PROD_BASE_URL }} 
+          NUXT_PUBLIC_API_LARAVEL_URL: ${{ secrets.PROD_API_LARAVEL_URL }} 
+          NUXT_PUBLIC_NODE_URL: ${{ secrets.PROD_NODE_URL }} 
+
+      # Backend - Laravel
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, ctype, fileinfo, openssl, PDO, mysql, tokenizer, xml
+          tools: composer
+
+      - name: Instalar dependencias Laravel
+        run: |
+          composer install --no-dev --optimize-autoloader
+          cp .env.production .env
+          
+          # Variables de ejemplo (ajusta según tu proyecto)
+          sed -i "s|DB_DATABASE=.*|DB_DATABASE=${{ secrets.PROD_DB_NAME }}|" .env
+          sed -i "s|DB_USERNAME=.*|DB_USERNAME=${{ secrets.PROD_DB_USER }}|" .env
+          sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=${{ secrets.PROD_DB_PASSWORD }}|" .env
+          
+          php artisan key:generate
+          php artisan config:cache
+        working-directory: ./back/laravel
+
+      # Backend - Node.js
+      - name: Setup Node.js para backend
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Instalar dependencias Node
+        run: npm ci
+        working-directory: ./back
+
+      # Configuración SSH
+      - name: Configurar acceso SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.CLOUDING_SSH_KEY }}" > ~/.ssh/clouding_key
+          chmod 600 ~/.ssh/clouding_key
+          echo "Host ${{ secrets.CLOUDING_HOST }}" >> ~/.ssh/config
+          echo "  User ${{ secrets.CLOUDING_USER }}" >> ~/.ssh/config
+          echo "  IdentityFile ~/.ssh/clouding_key" >> ~/.ssh/config
+
+      # Despliegue
+      - name: Transferir archivos vía rsync
+        run: |
+          # Frontend
+          rsync -avz --delete -e "ssh -o StrictHostKeyChecking=no" \
+            ./front/nuxt/.output/public/ \
+            ${{ secrets.CLOUDING_USER }}@${{ secrets.CLOUDING_HOST }}:/var/www/puntolocal/frontend
+
+          # Laravel
+          rsync -avz --exclude='.env' -e "ssh -o StrictHostKeyChecking=no" \
+            ./back/laravel/ \
+            ${{ secrets.CLOUDING_USER }}@${{ secrets.CLOUDING_HOST }}:/var/www/puntolocal/backend
+
+          # Node.js
+          rsync -avz -e "ssh -o StrictHostKeyChecking=no" \
+            ./back/server.js ./back/package*.json \
+            ${{ secrets.CLOUDING_USER }}@${{ secrets.CLOUDING_HOST }}:/var/www/puntolocal/node-server
+
+      # Configuración en el servidor
+      - name: Ejecutar comandos post-despliegue
+        run: |
+          ssh -i ~/.ssh/clouding_key ${{ secrets.CLOUDING_USER }}@${{ secrets.CLOUDING_HOST }} "
+            # Permisos Laravel
+            chmod -R 775 /var/www/puntolocal/backend/storage
+            chmod -R 775 /var/www/puntolocal/backend/bootstrap/cache
+
+            # Instalar dependencias Node.js
+            cd /var/www/puntolocal/node-server && npm ci --production
+
+            # Reiniciar servicios
+            sudo systemctl restart php8.2-fpm
+            sudo systemctl restart nginx
+            pm2 restart puntolocal-node --update-env
+          "

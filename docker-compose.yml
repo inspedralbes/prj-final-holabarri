@@ -1,0 +1,58 @@
+  services:
+    db:
+      image: mysql:8.2.0
+      restart: always
+      environment:
+        MYSQL_ROOT_PASSWORD: root
+        MYSQL_DATABASE: puntolocal
+        MYSQL_USER: user
+        MYSQL_PASSWORD: user
+      ports:
+        - 3306:3306
+      volumes:
+        - ./back/mysql_data:/var/lib/mysql #en produccion no se debe hacer esto, se debe hacer un copy
+      command: --host_cache_size=0
+
+    adminer:
+      image: adminer
+      restart: always
+      depends_on:
+        - db
+      ports:
+        - 9090:8080
+
+    laravel:
+      build: ./back/laravel
+      ports:
+        - 8000:8000
+      volumes:
+        - ./back/laravel:/var/www/html #en produccion no se debe hacer esto, se debe hacer un copy
+      working_dir: /var/www/html
+      depends_on:
+        - db
+      command: bash -c "composer install && php artisan key:generate && php artisan migrate:fresh --seed && php artisan serve --host=0.0.0.0"
+
+    node:
+      image: node:current
+      restart: always
+      depends_on:
+        - db
+      ports:
+        - 8001:3000
+      volumes:
+        - ./back:/home/node/app
+      working_dir: /home/node/app
+      command: bash -c "npm install && node server.js"
+
+    nuxt:
+      build: ./front/nuxt
+      ports:
+        - 80:5173
+      volumes:
+        - ./front/nuxt:/app #en produccion no se debe hacer esto, se debe hacer un copy
+        - /app/node_modules
+      working_dir: /app/
+      # depends_on: //no quiero que si laravel no va, la pagina no vaya
+      #   - laravel
+        # - node
+      command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
